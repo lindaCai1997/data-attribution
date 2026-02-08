@@ -1,0 +1,51 @@
+# sweep_select_train_data_dolly_and_ultrachat_trak.yaml
+# TRAK-based training data selection sweep
+# Uses weight gradient attribution via Johnson-Lindenstrauss projection
+### usage: 
+# wandb sweep script_cos/sweep_select_train_data_dolly_and_ultrachat_trak.yaml
+# wandb agent <project/sweep_id>  or wandb agent <project/sweep_id> --count <num_runs>
+name: Layer19_select_train_data_trak-natural_datasets
+project: test   # or whatever project you're actually using
+
+method: grid    # full cartesian product of all parameter values
+
+parameters:
+
+  train-data-name:
+    values: ["dolly_10k"] #, "ultrachat_200k", "openorca_200k"
+  eval-data-name:
+    values: ["medhallu_easy_with_knowledge", "medhallu_medium_with_knowledge", "medhallu_hard_with_knowledge"]  
+  attribution-method:
+    values: ["trak+none"]
+  selection-method:
+    values: ["trak"]
+  k2:
+    value: 500
+  layer:
+    value: 19
+  epochs:
+    value: 1
+  batch-size:
+    value: 2
+  eval-method:
+    value: llm_judge
+  root-dir:
+    value: /scratch7/users/aypan/tcai-scores/llama_attr_l19_cos
+  model-id:
+    value: meta-llama/Meta-Llama-3.1-8B-Instruct
+  projection-method:
+    value: cos_sim
+  # Base directory for eval data - the script will construct full paths for cross_entropy and llm_judge eval using eval-data-name
+  eval-data-base-dir:
+    value: /scratch7/users/aypan/tcai-scores
+
+
+# This is the entrypoint; W&B will substitute ${...} with concrete values.
+command:
+  - ${env}
+  - torchrun
+  - --standalone
+  - --nproc_per_node=1
+  - -m
+  - selection.select_train_data
+  - ${args}

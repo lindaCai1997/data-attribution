@@ -1,0 +1,52 @@
+# sweep_select_data_from_pvgen_dolly_and_ultrachat_medical.yaml
+# Persona Vector (PV) based training data selection sweep for medical datasets
+# Uses pre-computed persona vectors to select training data
+### usage: 
+# wandb sweep script_cos/sweep_select_data_from_pvgen_dolly_and_ultrachat_medical.yaml
+# wandb agent <project/sweep_id>  or wandb agent <project/sweep_id> --count <num_runs>
+name: Layer19_select_train_data_from_pv-natural_datasets-cos_sim-medical
+project: test   # or whatever project you're actually using
+
+method: grid    # full cartesian product of all parameter values
+
+parameters:
+  train-data-name:
+    values: ["dolly_10k" , "ultrachat_200k", "openorca_200k"]  
+  eval-data-name:
+    values: ["medhallu_easy_with_knowledge", "medhallu_medium_with_knowledge", "medhallu_hard_with_knowledge"]  
+  attribution-method:
+    values: ["residual_change_treatment+none"]
+  selection-method:
+    values: ["persona_vector_gen"] 
+  k2:
+    value: 500
+  layer:
+    value: 19
+  epochs:
+    value: 1
+  batch-size:
+    value: 2
+  eval-method:
+    value: llm_judge
+  root-dir:
+    value: /scratch7/users/aypan/tcai-scores/llama_attr_l19_cos
+  model-id:
+    value: meta-llama/Meta-Llama-3.1-8B-Instruct
+  persona-vector-path:
+    value: /scratch7/users/aypan/tcai-scores/llama_persona_vectors
+  # Base directory for eval data - the script will construct full paths for cross_entropy and llm_judge eval using eval-data-name
+  projection-method:
+    value: cos_sim
+  eval-data-base-dir:
+    value: /scratch7/users/aypan/tcai-scores
+
+
+# This is the entrypoint; W&B will substitute ${...} with concrete values.
+command:
+  - ${env}
+  - torchrun
+  - --standalone
+  - --nproc_per_node=1
+  - -m
+  - selection.select_train_data
+  - ${args}
