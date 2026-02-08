@@ -1,7 +1,8 @@
 # Attribution-Based Training Data Selection Pipeline
 
 This repository implements an evaluation pipeline for attribution-based training data selection methods for fine-tuning large language models. The pipeline decouples attribution computation from downstream fine-tuning and behavioral assessment. 
-**The preliminary writeup of our work and discussion about our results can be found in Data_Attribution_Writeup.pdf.** 
+
+This is a clean release of an ongoing project. **The preliminary writeup of our work and discussion about our results can be found in Data_Attribution_Writeup.pdf.** 
 
 ## Overview
 
