@@ -1,17 +1,42 @@
 #!/bin/bash
 #SBATCH --job-name=wandb-agent
+#SBATCH --account=site
+#SBATCH --partition=jsteinhardt
 #SBATCH --qos=preemptive
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:A100:1
+# Balrog now usable after patching world_size>1 guards on NCCL collectives
+# (NCCL broadcast/all_reduce/barrier silently SIGSEGV on A100-PCIE at ws=1).
 #SBATCH --mem-per-cpu=10G
 #SBATCH --time=48:00:00
 #SBATCH --requeue
 #SBATCH --signal=B:TERM@60
 # IMPORTANT: don't set --output/--error here; we redirect below once RUN_DIR is known.
 
-export HF_HOME="$HOME/.cache/huggingface"
+export HF_HOME="${HF_HOME:-/scratch/users/spa-data-attribution/huggingface-cache}"
+export HF_HUB_OFFLINE=1
+export WANDB_DIR="${WANDB_DIR:-/scratch/users/spa-data-attribution/wandb}"
+
+# Activate the project conda env (torch / transformers / peft / wandb / etc).
+source /usr/local/linux/miniforge-3.13/etc/profile.d/conda.sh
+conda activate /scratch/users/spa-data-attribution/conda/envs/data-attribution
+
+# Load API keys (OPENAI_API_KEY for llm_judge, HUGGING_FACE_HUB_TOKEN for gated models).
+REPO_DIR="/accounts/projects/jsteinhardt/spa-data-attribution/attribution-temp"
+ENV_FILE="${REPO_DIR}/.env"
+if [ -f "$ENV_FILE" ]; then
+    set -a
+    . "$ENV_FILE"
+    set +a
+fi
+
+# Wandb routing: WANDB_PROJECT comes from .env (=downstream_v2). Entity comes
+# from the sweep ID we agent against (data_attribution/...). No override needed.
+
+cd "${REPO_DIR}"
+
 set -euo pipefail
 
 : "${RUN_DIR:?RUN_DIR not set}"
@@ -95,9 +120,9 @@ echo "sweep_id=${SWEEP_ID}"
 
 log_line "START sweep_id=${SWEEP_ID}"
 
-# Run wandb agent with --count 5 (one run per agent)
+# Run wandb agent with configurable count (default 5).
 # GPU is automatically allocated via --gres=gpu:1
-wandb agent "${SWEEP_ID}" --count 5
+wandb agent "${SWEEP_ID}" --count "${AGENT_COUNT:-5}"
 
 mark_ok
 trap - EXIT

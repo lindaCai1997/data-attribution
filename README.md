@@ -2,7 +2,7 @@
 
 This repository designs novel activation-space gradient-based data attribution methods which outperforms existing weight-space and prompt-based methods, and implements an evaluation pipeline for these data selection methods on identifying harmful or hallucination inducing training examples during fine-tuning. The pipeline decouples attribution computation from downstream fine-tuning and behavioral assessment. 
 
-This is a clean release of an ongoing project. **The preliminary writeup of our work and discussion about our results can be found in Data_Attribution_Writeup.pdf.** 
+This is the code release for **ATLAS: Exploring Scalable Activation-Space Data Attribution** (accepted to EMNLP Findings).
 
 ## Overview
 
@@ -17,6 +17,8 @@ Our evaluation pipeline works as follows:
 4. **Fine-tuning**: We fine-tune the base model (`Llama-3.1-8B-Instruct`) on the selected subset using LoRA.
 
 5. **Evaluation**: Model outputs are assessed using an LLM-based judge, equipped with either ground-truth answers or calibrated few-shot examples, and scored on a discrete scale (0–3 or 0–2) that measures the expression of the target behavioral trait.
+
+In addition to the fine-tuning evaluation, the repository includes an **activation-steering evaluation** (`selection/steering_experiment.py`): the direction produced by a selection method is applied as an activation-steering vector, and we measure the trait-judge dose–response together with a coherence judge, across layers and models (Llama-3.1-8B-Instruct, Qwen2.5-7B-Instruct). The `analysis/` directory contains the additional analyses reported in the paper's appendices (see [Additional Analyses](#additional-analyses-analysis)).
 
 ## Installation
 
@@ -39,22 +41,35 @@ pip install -r requirements.txt
 ```
 .
 ├── main.py                     # Single-method attribution computation
-├── main_batched.py             # Simultaneous multi-method attribution computation
+├── main_batched.py             # Simultaneous multi-method attribution computation (resume-safe)
 ├── main_trak.py                # TRAK baseline (weight gradient attribution)
 ├── method.py                   # Attribution method implementations
-├── trak_method.py              # TRAK weight gradient implementation
+├── trak_method.py              # TRAK projectors (factored Kronecker + streaming count-sketch)
+├── compare_projector_outputs.py        # Factored vs streaming projector comparison
 ├── utils.py                    # Utility functions
 ├── selection/                  # Training data selection & evaluation
-│   ├── select_train_data.py    # End-to-end selection pipeline
+│   ├── select_train_data.py    # End-to-end selection pipeline (incl. mix_* methods)
 │   ├── finetune.py             # LoRA fine-tuning
 │   ├── eval.py                 # Evaluation dispatcher
+│   ├── eval_no_selection.py    # Base-model (no-selection) baseline eval
 │   ├── matrix.py               # Sharded score matrix utilities
 │   ├── probe.py                # (Experimental) Probe-based methods
+│   ├── steering_experiment.py  # Activation-steering dose-response evaluation
+│   ├── judge_coherence_post.py # Coherence-judge post-pass over steering outputs
+│   ├── aggregate_h_l_norms.py  # Pooled hidden-state norms (for --alpha-relative)
+│   ├── analyze_steering*.py    # Steering sweep analysis
+│   ├── plot_steering_dose_response.py  # Paper plots for steering results
+│   ├── sample_steering_outputs.py      # Qualitative steering samples
 │   └── llm_judge/              # LLM-as-a-judge evaluation
-│       ├── judge.py            # Judge implementation
+│       ├── judge.py            # Judge implementation (with retry/backoff)
 │       ├── prompts.py          # Evaluation prompts
 │       └── test/               # Testing utilities
-├── script_cos/                 # Cosine similarity sweep scripts
+├── analysis/                   # Analyses behind the paper's figures, tables & appendices
+│   ├── paper_results/          # Scripts generating the paper's figures and tables
+│   ├── planted_recovery/       # Planted-example retrieval (ground-truth validation)
+│   ├── cross_model_transfer/   # Cross-model transfer of selected subsets
+│   └── compute_benchmark/      # Compute comparison with TRAK
+├── script_cos/                 # Downstream sweep configs + SLURM launchers
 └── script_compute_attr/        # Attribution computation scripts
 ```
 
@@ -78,6 +93,8 @@ torchrun --nproc_per_node=4 main_batched.py \
     --batch-size 2 \
     --max-tokens 1024
 ```
+
+`--method selected_methods` computes the six methods used in the paper (`residual_treatment`, `residual_control`, `residual_diff`, `residual_change_treatment`, `residual_change_control`, `residual_change`) in one batched pass. Long runs are preemption-safe: complete shards already on disk are skipped on restart (disable with `--no-resume`).
 
 #### Option B: Single-method attribution
 
@@ -106,6 +123,8 @@ torchrun --nproc_per_node=1 main_trak.py \
     --batch-size 1 \
     --max-tokens 1024
 ```
+
+Two projector backends are available via `--projector-type`: `factored` (default) uses a Kronecker-factored Johnson–Lindenstrauss projection that never materializes the full per-layer weight-gradient matrix (roughly 30× fewer FLOPs on the largest Llama-3.1-8B layers); `streaming` is the original count-sketch projector, kept for parity checks. `compare_projector_outputs.py` compares the two backends' output shards on real data.
 
 ### Step 2: Run Training Selection Sweep or Individual Experiments 
 
@@ -162,6 +181,27 @@ python -m selection.select_train_data \
     --epochs 1
 ```
 
+Besides the single-method values, `--attribution-method` accepts mixed selection: `mix_rd_rct`, `mix_rd_rct_rd`, and `mix_rd_rct_pv` combine the top-k lists of the residual-diff and residual-change-treatment branches (the `--mix-rd-k` flag controls how many of the k examples come from the residual-diff branch; default is an even split).
+
+### Step 3 (optional): Activation-Steering Evaluation
+
+`selection/steering_experiment.py` evaluates selection directions as activation-steering vectors, sweeping a steering coefficient and scoring generations with the trait judge (plus a coherence post-pass via `selection/judge_coherence_post.py`):
+
+```bash
+python -m selection.steering_experiment \
+    --layer 19 \
+    --methods residual_diff residual_change persona_vector \
+    --datasets sycophancy_gpt medhallu_easy_with_knowledge \
+    --coeffs 0.0 2.0 4.0 6.0 \
+    --output-dir /path/to/steering_out
+```
+
+Norm-aware steering (`h' = h + alpha * (v/||v||) * ||h_l||`) is enabled with `--alpha-relative --h-l-norms-json <file>`, where the per-layer pooled hidden-state norms are produced by `selection/aggregate_h_l_norms.py`. Runs resume cell-by-cell from the output directory. Analysis and plotting live in `selection/analyze_steering_layer_sweep.py` and `selection/plot_steering_dose_response.py`. The `persona_vector` steering method requires the external persona-vector repository (located via the `PERSONA_VECTOR_REPO` environment variable).
+
+## Additional Analyses (`analysis/`)
+
+The `analysis/` folder contains the analyses behind the paper's results. `paper_results/` holds the scripts that aggregate the experiment outputs into the paper's figures and tables (main results and per-layer tables, the free-generation and MedHallu method-comparison figures, the steering-alignment analysis, and the mixing-ratio ablation). The remaining subfolders are self-contained additional experiments from the appendices: a ground-truth validation that plants known behavior-inducing examples into a benign corpus and measures how well each attribution method retrieves them (`planted_recovery/`), a study of whether training subsets selected by one model's attribution transfer to fine-tuning a different model (`cross_model_transfer/`), and a compute comparison against TRAK (`compute_benchmark/`).
+
 ## Evaluation Datasets
 
 ### LLM Judge
@@ -177,6 +217,8 @@ Evaluates factual accuracy in medical question answering:
 | `medhallu_easy_with_knowledge` | medical_consistency | 0-2 |
 | `medhallu_medium_with_knowledge` | medical_consistency | 0-2 |
 | `medhallu_hard_with_knowledge` | medical_consistency | 0-2 |
+
+The paper's experiments use the `medhallu_*_with_knowledge_balanced` variants of these datasets (label-balanced splits; same judge trait and scale).
 
 #### Ultrafeedback
 
@@ -208,7 +250,9 @@ The pipeline supports the following attribution methods:
 | `residual_diff` | Difference in residual stream activations between treatment and control responses | `main.py` `main_batched.py` |
 | `residual_change_treatment` | Estimated change in residual activation after fine-tuning on the datapoint | `main.py` `main_batched.py` |
 | `residual_change` | residual_change_treatment(treatment) - residual_change_treatment(control) | `main.py` `main_batched.py` |
-| `trak` | Weight gradient attribution compressed to 4096-dimensional vector via Johnson-Lindenstrauss projection | `main_trak.py` |
+| `trak` | Weight gradient attribution compressed to 4096-dimensional vector via Johnson-Lindenstrauss projection (`--projector-type factored` or `streaming`) | `main_trak.py` |
+
+`main_batched.py` also accepts the bundle values `all_v3` and `selected_methods`, which compute several of these methods simultaneously in one forward/backward pass.
 
 ## Output Structure
 
@@ -244,6 +288,8 @@ OPENAI_API_KEY=your_api_key_here
 WANDB_API_KEY=your_wandb_key_here  # Optional, can disable wandb
 HUGGING_FACE_HUB_TOKEN=your_llama_token_here  # Only required for gated model like llama
 ```
+
+Analysis and experiment scripts read their default data root from `SPA_DATA_ROOT` (falling back to the authors' cluster scratch directory) — set it to point at your own data directory. `selection/steering_experiment.py` locates the external persona-vector repository via `PERSONA_VECTOR_REPO`. The SLURM launchers (`*.sbatch`, `script_cos/*.sh`, sweep YAMLs) record the exact configurations used for the paper's experiments and contain cluster-specific partitions and paths; adapt them to your environment before use.
 
 ### Data Paths
 

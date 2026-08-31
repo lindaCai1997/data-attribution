@@ -146,6 +146,15 @@ def run_lora_finetune_on_subset(cfg: LoraFTConfig, eval_cfg: EvalConfig):
     Supports single-GPU and DDP (if launched via torchrun).
     Returns the saved LoRA adapter folder path.
     """
+    # Hopper-only: force fp32 reduction for bf16 matmuls. A100 already
+    # reduces in fp32 by default; H100/H200 default to bf16 reduction which
+    # causes mid-training NaN in this LoRA setup. Gating by device name keeps
+    # A100 results bit-identical.
+    if torch.cuda.is_available():
+        _dev_name = torch.cuda.get_device_name(0)
+        if "H200" in _dev_name or "H100" in _dev_name:
+            torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+
     # ------------- dist / device -------------
     if not dist.is_initialized():
         try:
@@ -163,7 +172,7 @@ def run_lora_finetune_on_subset(cfg: LoraFTConfig, eval_cfg: EvalConfig):
 
     if os.environ.get("WANDB_DISABLED", "").lower() not in {"true", "1"}:
         run = _safe_wandb_init(
-            project="data-attribution",
+            project=os.environ.get("WANDB_PROJECT", "data-attribution"),
             name=cfg.wandb_name,
             tags=[],
             config={
@@ -356,7 +365,8 @@ def run_lora_finetune_on_subset(cfg: LoraFTConfig, eval_cfg: EvalConfig):
         )
     # ------------- teardown -------------
     if dist.is_initialized():
-        dist.barrier()
+        if dist.get_world_size() > 1:
+            dist.barrier()
         dist.destroy_process_group()
 
     if rank == 0:

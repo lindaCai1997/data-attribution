@@ -1,11 +1,19 @@
 import os
+import asyncio
+import random
 from typing import Dict, List
 import math
 from functools import lru_cache
 from pathlib import Path
 import yaml
 import numpy as np
-from openai import AsyncOpenAI
+from openai import (
+    AsyncOpenAI,
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+    RateLimitError,
+)
 from selection.llm_judge.config import setup_credentials
 import re
 import json
@@ -13,6 +21,13 @@ import json
 # Set up credentials and environment
 config = setup_credentials()
 openai = AsyncOpenAI()
+
+_RETRYABLE_ERRORS = (
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+    RateLimitError,
+)
 
 class OpenAiJudge:
     """OpenAI models tokenize all numbers from 0-100 as single tokens, which is why we can get exactly 
@@ -33,10 +48,17 @@ class OpenAiJudge:
 
     # query judge model to get the score
     async def query_full_text(self, messages) -> str:
-        completion = await openai.chat.completions.create(
-            model=self.model, messages=messages, temperature=0, seed=0
-        )
-        return getattr(completion.choices[0].message, "content", "") or ""
+        last_err = None
+        for attempt in range(6):
+            try:
+                completion = await openai.chat.completions.create(
+                    model=self.model, messages=messages, temperature=0, seed=0
+                )
+                return getattr(completion.choices[0].message, "content", "") or ""
+            except _RETRYABLE_ERRORS as e:
+                last_err = e
+                await asyncio.sleep(min(60.0, 2.0 ** attempt) + random.random())
+        raise last_err
 
     #extract the score from the judge model's response text
     def _aggregate_scores(self, response_text: str):

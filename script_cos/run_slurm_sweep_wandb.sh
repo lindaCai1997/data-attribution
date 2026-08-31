@@ -42,7 +42,7 @@ echo "Each agent will run: wandb agent ${SWEEP_ID} --count 5" | tee -a "${PROGRE
 sbatch \
   --output="${RUN_DIR}/logs/slurm-%x-%A_%a.out" \
   --error="${RUN_DIR}/logs/slurm-%x-%A_%a.err" \
-  --export=ALL,RUN_DIR="${RUN_DIR}",PROGRESS_LOG="${PROGRESS_LOG}",SWEEP_ENV="${SWEEP_ENV}" \
+  --export=ALL,RUN_DIR="${RUN_DIR}",PROGRESS_LOG="${PROGRESS_LOG}",SWEEP_ENV="${SWEEP_ENV}",AGENT_COUNT="${AGENT_COUNT:-5}" \
   --array=0-$((NUM_AGENTS-1))%${MAX_CONCURRENT} \
   script_cos/run_one_wandb.sbatch
 

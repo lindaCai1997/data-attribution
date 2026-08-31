@@ -1,0 +1,40 @@
+name: downstream_v2_sanity_eager_vs_sdpa
+entity: data_attribution
+project: downstream_v2
+
+method: grid
+
+parameters:
+  root-dir:
+    value: /scratch/users/spa-data-attribution/data/llama_attr_l17_cos
+  train-data-name:
+    value: dolly_10k
+  eval-data-name:
+    values:
+      - empathy_gpt
+      - modesty_gpt
+      - medhallu_easy_with_knowledge_balanced
+  attribution-method:
+    value: "residual_diff+none"
+  selection-method:
+    value: "residual_diff+none"
+  k2:
+    value: 500
+  epochs:
+    value: 1
+  batch-size:
+    value: 2
+  eval-method:
+    value: llm_judge
+  model-id:
+    value: meta-llama/Meta-Llama-3.1-8B-Instruct
+  projection-method:
+    value: cos_sim
+  eval-data-base-dir:
+    value: /scratch/users/spa-data-attribution
+
+command:
+  - ${env}
+  - python
+  - script_cos/sweep_run.py
+  - ${args}

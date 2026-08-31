@@ -1,0 +1,57 @@
+# Main downstream sweep for Llama-3.1-8B-Instruct, layer 19 only.
+# Mirrors sweep_main_llama.yaml (l15/l17/l21) for the l19 regeneration.
+# Cartesian: 1 layer x 2 attribution x 3 selection x 10 eval x 3 train = 180 runs.
+# Layer is inferred from root-dir by sweep_run.py (needed for persona_vector_gen).
+#
+# Usage:
+#   wandb sweep script_cos/sweep_main_llama_l19.yaml
+#   SWEEP_ID=data_attribution/downstream_v2/<sweep_id> bash script_cos/run_slurm_sweep_wandb.sh
+name: downstream_v2_main_llama_l19
+entity: data_attribution
+project: downstream_v2
+
+method: grid
+
+parameters:
+  root-dir:
+    value: /scratch/users/spa-data-attribution/data/llama_attr_l19_cos
+  train-data-name:
+    values: ["dolly_10k", "openorca_200k", "ultrachat_200k"]
+  eval-data-name:
+    values:
+      - empathy_gpt
+      - laziness_gpt
+      - modesty_gpt
+      - preachiness_gpt
+      - sycophancy_gpt
+      - medhallu_easy_with_knowledge_balanced
+      - medhallu_medium_with_knowledge_balanced
+      - medhallu_hard_with_knowledge_balanced
+      - ultra_coding_instruction_following
+      - ultra_factual_truthfulness
+  attribution-method:
+    values: ["residual_diff+none", "residual_change_treatment+none"]
+  selection-method:
+    values: ["residual_diff+none", "residual_change+none", "persona_vector_gen"]
+  k2:
+    value: 500
+  epochs:
+    value: 1
+  batch-size:
+    value: 2
+  eval-method:
+    value: llm_judge
+  model-id:
+    value: meta-llama/Meta-Llama-3.1-8B-Instruct
+  projection-method:
+    value: cos_sim
+  persona-vector-path:
+    value: /scratch/users/spa-data-attribution/data/llama_persona_vectors
+  eval-data-base-dir:
+    value: /scratch/users/spa-data-attribution
+
+command:
+  - ${env}
+  - python
+  - script_cos/sweep_run.py
+  - ${args}

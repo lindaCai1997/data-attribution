@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+wandb/
+sweep_runs/
+*.code-workspace
+.DS_Store

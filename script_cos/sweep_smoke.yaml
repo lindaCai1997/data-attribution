@@ -1,0 +1,42 @@
+# Smoke test: 1 run to validate the entire pipeline before launching production sweeps.
+#
+# Usage:
+#   wandb sweep script_cos/sweep_smoke.yaml
+#   NUM_AGENTS=1 SWEEP_ID=data_attribution/downstream_v2/<sweep_id> bash script_cos/run_slurm_sweep_wandb.sh
+name: downstream_v2_smoke
+entity: data_attribution
+project: downstream_v2
+
+method: grid
+
+parameters:
+  root-dir:
+    value: /scratch/users/spa-data-attribution/data/llama_attr_l17_cos
+  train-data-name:
+    value: dolly_10k
+  eval-data-name:
+    value: empathy_gpt
+  attribution-method:
+    value: "residual_diff+none"
+  selection-method:
+    value: "residual_diff+none"
+  k2:
+    value: 500
+  epochs:
+    value: 1
+  batch-size:
+    value: 2
+  eval-method:
+    value: llm_judge
+  model-id:
+    value: meta-llama/Meta-Llama-3.1-8B-Instruct
+  projection-method:
+    value: cos_sim
+  eval-data-base-dir:
+    value: /scratch/users/spa-data-attribution
+
+command:
+  - ${env}
+  - python
+  - script_cos/sweep_run.py
+  - ${args}

@@ -309,6 +309,9 @@ def validate_and_set_args(args):
         "persona_vector",
         "trak",
         "random",
+        "mix_rd_rct",
+        "mix_rd_rct_rd",
+        "mix_rd_rct_pv",
     }
     # Support both plain methods and methods with +none suffix
     SUFFIXES = {"none", "mlp", "linear"}

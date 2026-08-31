@@ -1,0 +1,44 @@
+# "No-selection" baseline: evaluate the base model on each eval dataset
+# without any fine-tuning. Provides the floor that selection+finetune is
+# compared against.
+# Cartesian: 2 models x 10 evals = 20 runs.
+name: downstream_v2_no_selection
+entity: data_attribution
+project: downstream_v2
+
+method: grid
+
+parameters:
+  root-dir:
+    value: /scratch/users/spa-data-attribution/data/no_selection_baseline
+  model-id:
+    values:
+      - meta-llama/Meta-Llama-3.1-8B-Instruct
+      - Qwen/Qwen2.5-7B-Instruct
+  eval-data-name:
+    values:
+      - empathy_gpt
+      - laziness_gpt
+      - modesty_gpt
+      - preachiness_gpt
+      - sycophancy_gpt
+      - medhallu_easy_with_knowledge_balanced
+      - medhallu_medium_with_knowledge_balanced
+      - medhallu_hard_with_knowledge_balanced
+      - ultra_coding_instruction_following
+      - ultra_factual_truthfulness
+  batch-size:
+    value: 2
+  judge-repeats:
+    value: 3
+  eval-method:
+    value: llm_judge
+  eval-data-base-dir:
+    value: /scratch/users/spa-data-attribution
+
+command:
+  - ${env}
+  - python
+  - -m
+  - selection.eval_no_selection
+  - ${args}

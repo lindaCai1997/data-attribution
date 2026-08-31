@@ -1,0 +1,38 @@
+# Qwen smoke: 1 run to validate Qwen2.5-7B-Instruct on H200-eager before launching main_qwen.
+name: downstream_v2_smoke_qwen
+entity: data_attribution
+project: downstream_v2
+
+method: grid
+
+parameters:
+  root-dir:
+    value: /scratch/users/spa-data-attribution/data/qwen2.5_attr_l17_cos
+  train-data-name:
+    value: dolly_10k
+  eval-data-name:
+    value: empathy_gpt
+  attribution-method:
+    value: "residual_diff+none"
+  selection-method:
+    value: "residual_diff+none"
+  k2:
+    value: 500
+  epochs:
+    value: 1
+  batch-size:
+    value: 2
+  eval-method:
+    value: llm_judge
+  model-id:
+    value: Qwen/Qwen2.5-7B-Instruct
+  projection-method:
+    value: cos_sim
+  eval-data-base-dir:
+    value: /scratch/users/spa-data-attribution
+
+command:
+  - ${env}
+  - python
+  - script_cos/sweep_run.py
+  - ${args}

@@ -661,6 +661,72 @@ class AllV3Methods(BaseAttributionMethod):
             residual_control,
         )
 
+
+@register_method("selected_methods")
+class SelectedMethods(BaseAttributionMethod):
+    """
+    Returns ALL current methods (each [B, D]) in this order:
+
+      1) residual_treatment 
+      2) residual_control
+      3) residual_diff
+      4) residual_change_treatment
+      5) residual_change_control 
+      6) residual_change
+    """
+
+    requires_grads = True
+    requires_control = True
+
+    @staticmethod
+    def _masked_mean(x: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
+        m = m.to(dtype=x.dtype)
+        denom = m.sum(dim=1, keepdim=True).clamp_min(1.0)
+        return (x * m.unsqueeze(-1)).sum(dim=1) / denom  # [B, D]
+
+    def forward(
+        self,
+        *,
+        input_treat, acts_treat, grads_treat, mask_treat,
+        input_ctrl, acts_ctrl, grads_ctrl, mask_ctrl,
+        tokens_treat, attn_treat, tokens_ctrl, attn_ctrl,
+        sae, llm, tokenizer=None,
+    ) -> torch.Tensor:
+        if grads_treat is None or grads_ctrl is None:
+            raise RuntimeError("SelectedMethods requires gradients; set method.requires_grads=True.")
+
+        # ----- Activations-only (shared) -----
+        act_t = self._masked_mean(acts_treat.float(), mask_treat)  # [B, D]
+        act_c = self._masked_mean(acts_ctrl.float(),  mask_ctrl)   # [B, D]
+
+        residual_treatment = act_t
+        residual_control = act_c
+        residual_diff = act_t - act_c
+
+        # ----- Gradient-weighted pieces (shared) -----
+        # For residual_change_treatment / residual_change_control / residual_change
+        norm_t = torch.matmul(input_treat.float(), input_treat.float().transpose(-1, -2))  # [B, Tt, Tt]
+        norm_c = torch.matmul(input_ctrl.float(),  input_ctrl.float().transpose(-1, -2))   # [B, Tc, Tc]
+
+        delta_t = torch.matmul(norm_t, grads_treat.float())  # [B, Tt, D]
+        delta_c = torch.matmul(norm_c, grads_ctrl.float())   # [B, Tc, D]
+
+        grad_t = self._masked_mean(delta_t, mask_treat)  # [B, D]
+        grad_c = self._masked_mean(delta_c, mask_ctrl)   # [B, D]
+
+        residual_change_treatment = -1.0 * grad_t
+        residual_change_control = -1.0 * grad_c
+        residual_change = -1.0 * (grad_t - grad_c)
+
+        return (
+            residual_treatment,
+            residual_control,
+            residual_diff,
+            residual_change_treatment,
+            residual_change_control,
+            residual_change,
+        )
+
 # ---------------- Method builder ----------------
 
 def build_method(name: str, *_, **__) -> BaseAttributionMethod:

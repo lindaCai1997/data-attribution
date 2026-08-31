@@ -138,8 +138,9 @@ def select_training_data(args, rank: int) -> tuple:
     """
     rng = np.random.default_rng(args.seed)
     
-    if args.attribution_method == "random":
-        # Random selection baseline
+    if args.attribution_method.split("+")[0] == "random":
+        # Random selection baseline. attribution_method may be "random" or "random+none";
+        # the +suffix doesn't change baseline behavior.
         train_df = fetch_data_from_indices(
             dir_path=args.train_dir.replace("random", "residual_diff"),
             indices=args.k2,
@@ -212,6 +213,71 @@ def select_training_data(args, rank: int) -> tuple:
             indices=data_idx,
             seed=args.seed,
         )
+
+    elif args.attribution_method.split("+")[0] in ("mix_rd_rct", "mix_rd_rct_rd", "mix_rd_rct_pv"):
+        # Mix selection: top-(k2/2) from (residual_diff train, residual_diff eval) +
+        # top-(k2/2) from (residual_change_treatment train, X eval) where X is:
+        #   - residual_change  for mix_rd_rct      (default; matches "RCT + RC")
+        #   - residual_diff    for mix_rd_rct_rd   (RCT + RD)
+        #   - persona_vector   for mix_rd_rct_pv   (RCT + PV; needs --persona-vector-path)
+        # Duplicates across the two top-lists are kept so the final size is exactly k2.
+        import polars as pl
+        mix_kind = args.attribution_method.split("+")[0]
+        base_train = Path(args.root_dir) / args.train_data_name
+        base_eval  = Path(args.root_dir) / args.eval_data_name
+        if args.mix_rd_k is None:
+            assert args.k2 % 2 == 0, f"--k2 must be even for mix_* (got {args.k2})"
+            k_rd = args.k2 // 2
+        else:
+            assert 0 < args.mix_rd_k < args.k2, (
+                f"--mix-rd-k must be in (0, k2) (got {args.mix_rd_k}, k2={args.k2})"
+            )
+            k_rd = args.mix_rd_k
+        k_rct = args.k2 - k_rd
+
+        def _topk_cos_meaneval(train_dir: Path, eval_dir: Path, k_per: int) -> np.ndarray:
+            eval_mat  = ShardedScoreMatrix(str(eval_dir),  layer_idx=args.layer_idx).materialize()
+            train_mat = ShardedScoreMatrix(str(train_dir), layer_idx=args.layer_idx).materialize()
+            eval_normed = eval_mat / eval_mat.norm(dim=1, keepdim=True).clamp(min=1e-6)
+            eval_mean = eval_normed.mean(dim=0) if isinstance(eval_normed, torch.Tensor) else np.mean(eval_normed, axis=0)
+            if not isinstance(eval_mean, torch.Tensor):
+                eval_mean = torch.from_numpy(eval_mean)
+            eval_unit = eval_mean / eval_mean.norm().clamp(min=1e-8)
+            train_normed = train_mat / train_mat.norm(dim=1, keepdim=True).clamp(min=1e-6)
+            scores = train_normed @ eval_unit
+            return torch.topk(scores, k_per).indices.int().cpu().numpy()
+
+        def _topk_cos_pv(train_dir: Path, k_per: int) -> np.ndarray:
+            assert args.persona_vector_path is not None, (
+                "--persona-vector-path is required for mix_rd_rct_pv"
+            )
+            pv_file = Path(args.persona_vector_path) / f"{args.eval_data_name}.pt"
+            pv = torch.load(pv_file)[args.layer]
+            train_mat = ShardedScoreMatrix(str(train_dir), layer_idx=args.layer_idx).materialize()
+            train_normed = train_mat.float() / train_mat.float().norm(dim=1, keepdim=True).clamp(min=1e-6)
+            pv_unit = (pv.float() / torch.norm(pv.float()).clamp(min=1e-6)).to(train_normed.device)
+            scores = train_normed @ pv_unit
+            return torch.topk(scores, k_per).indices.int().cpu().numpy()
+
+        # Branch 1: RD attribution × RD selection (unchanged across all mix variants).
+        rd_train_dir = base_train / "residual_diff"
+        rd_eval_dir  = base_eval  / "residual_diff"
+        rd_idx = _topk_cos_meaneval(rd_train_dir, rd_eval_dir, k_rd)
+
+        # Branch 2: RCT attribution × {RC, RD, PV} selection.
+        rct_train_dir = base_train / "residual_change_treatment"
+        if mix_kind == "mix_rd_rct":
+            rct_idx = _topk_cos_meaneval(rct_train_dir, base_eval / "residual_change", k_rct)
+        elif mix_kind == "mix_rd_rct_rd":
+            rct_idx = _topk_cos_meaneval(rct_train_dir, base_eval / "residual_diff", k_rct)
+        else:  # mix_rd_rct_pv
+            rct_idx = _topk_cos_pv(rct_train_dir, k_rct)
+
+        print(f"[{mix_kind}] top-{k_rd} RD overlap with top-{k_rct} RCT-branch: "
+              f"{len(set(rd_idx.tolist()) & set(rct_idx.tolist()))} indices")
+        df_rd  = fetch_data_from_indices(dir_path=str(rd_train_dir),  indices=rd_idx,  seed=args.seed)
+        df_rct = fetch_data_from_indices(dir_path=str(rct_train_dir), indices=rct_idx, seed=args.seed)
+        train_df = pl.concat([df_rd, df_rct])
 
     else:
         # Vector-based methods: residual_diff, residual_change, residual_change_treatment, trak
@@ -357,6 +423,11 @@ def main():
     
     # Output
     p.add_argument("--work-name", default=None, help="Custom suffix for output directory")
+    p.add_argument(
+        "--mix-rd-k", type=int, default=None,
+        help="For mix_* attribution methods: number of examples taken from the RD+RD "
+             "branch (RCT branch gets k2 - mix_rd_k). Default: k2 // 2.",
+    )
     p.add_argument("--save-model", action="store_true", help="Save the fine-tuned model")
     
     # Experiment tracking
@@ -393,7 +464,9 @@ def main():
     
     # Synchronize timestamp across ranks
     time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    if dist.is_initialized():
+    if dist.is_initialized() and dist.get_world_size() > 1:
+        # Skip broadcast at world_size=1: balrog (A100-PCIE) reliably
+        # silent-SIGSEGVs inside NCCL's broadcast_object_list collective.
         objects = [time_str] if rank == 0 else [None]
         dist.broadcast_object_list(objects, src=0)
         DATETIME_STR = objects[0]
@@ -424,7 +497,7 @@ def main():
         print(f"[OK] Saved selected train data to {train_data_path}")
         print(f"Time taken to select training data: {int(time.time() - t0)} seconds")
     
-    if dist.is_initialized():
+    if dist.is_initialized() and dist.get_world_size() > 1:
         dist.barrier(device_ids=[rank])
     
     train_data = list(get_file_iterator(train_data_path))
@@ -457,22 +530,25 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    try:
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model_id,
-            torch_dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2",
-        ).to(device)
-        if rank == 0:
-            print("[OK] Using flash_attention_2")
-    except (ImportError, ValueError) as e:
-        if rank == 0:
-            print(f"[WARN] flash_attention_2 not available ({e}), using SDPA")
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model_id,
-            torch_dtype=torch.bfloat16,
-            attn_implementation="sdpa"
-        ).to(device)
+    # Device-gated attention impl:
+    # - A100 (saruman, balrog): pin to "sdpa" to match the already-finished
+    #   runs in the sweep. Even if flash-attn gets installed later, A100 must
+    #   not switch to FA2 (that would invalidate cross-run comparisons).
+    # - H200/H100 (Hopper): SDPA bf16 produces NaN mid-training on this LoRA
+    #   setup; use "eager" attention (slower but numerically stable).
+    if torch.cuda.is_available():
+        _dev = torch.cuda.get_device_name(0)
+        _is_hopper = ("H100" in _dev) or ("H200" in _dev)
+    else:
+        _is_hopper = False
+    _attn = "eager" if _is_hopper else "sdpa"
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_id,
+        torch_dtype=torch.bfloat16,
+        attn_implementation=_attn,
+    ).to(device)
+    if rank == 0:
+        print(f"[OK] Using attn_implementation={_attn} (device: {_dev if torch.cuda.is_available() else 'cpu'})")
 
     # Configure fine-tuning
     wandb_config = {

@@ -1,0 +1,54 @@
+# Mix RD+RCT sweep for Llama-3.1-8B-Instruct, layer 19.
+# For each (train, eval) pair, the new mix_rd_rct attribution method selects
+# top-250 from residual_diff (RD+RD cos_sim) + top-250 from residual_change_treatment
+# (RCT+RC cos_sim), concatenated to a 500-example training set (duplicates kept).
+# MedHallu evals are intentionally excluded.
+# Cartesian: 1 layer x 3 train x 7 eval x 1 method = 21 runs.
+#
+# Usage:
+#   wandb sweep script_cos/sweep_mix_llama_l19.yaml
+#   SWEEP_ID=data_attribution/downstream_v2/<sweep_id> bash script_cos/run_slurm_sweep_wandb_mix.sh
+name: downstream_v2_mix_llama_l19
+entity: data_attribution
+project: downstream_v2
+
+method: grid
+
+parameters:
+  root-dir:
+    value: /scratch/users/spa-data-attribution/data/llama_attr_l19_cos
+  train-data-name:
+    values: ["dolly_10k", "openorca_200k", "ultrachat_200k"]
+  eval-data-name:
+    values:
+      - empathy_gpt
+      - laziness_gpt
+      - modesty_gpt
+      - preachiness_gpt
+      - sycophancy_gpt
+      - ultra_coding_instruction_following
+      - ultra_factual_truthfulness
+  attribution-method:
+    value: mix_rd_rct+none
+  selection-method:
+    value: mix_rd_rct+none
+  k2:
+    value: 500
+  epochs:
+    value: 1
+  batch-size:
+    value: 2
+  eval-method:
+    value: llm_judge
+  model-id:
+    value: meta-llama/Meta-Llama-3.1-8B-Instruct
+  projection-method:
+    value: cos_sim
+  eval-data-base-dir:
+    value: /scratch/users/spa-data-attribution
+
+command:
+  - ${env}
+  - python
+  - script_cos/sweep_run.py
+  - ${args}

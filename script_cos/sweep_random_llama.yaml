@@ -1,0 +1,52 @@
+# Random baseline sweep for Llama-3.1-8B-Instruct.
+# Random selection is layer-independent, so we fix root-dir to l19 (any layer works).
+# Cartesian: 10 eval x 3 train = 30 runs.
+#
+# Usage:
+#   wandb sweep script_cos/sweep_random_llama.yaml
+#   SWEEP_ID=data_attribution/downstream_v2/<sweep_id> bash script_cos/run_slurm_sweep_wandb.sh
+name: downstream_v2_random_llama
+entity: data_attribution
+project: downstream_v2
+
+method: grid
+
+parameters:
+  root-dir:
+    value: /scratch/users/spa-data-attribution/data/llama_attr_l19_cos
+  train-data-name:
+    values: ["dolly_10k", "openorca_200k", "ultrachat_200k"]
+  eval-data-name:
+    values:
+      - empathy_gpt
+      - laziness_gpt
+      - modesty_gpt
+      - preachiness_gpt
+      - sycophancy_gpt
+      - medhallu_easy_with_knowledge_balanced
+      - medhallu_medium_with_knowledge_balanced
+      - medhallu_hard_with_knowledge_balanced
+      - ultra_coding_instruction_following
+      - ultra_factual_truthfulness
+  attribution-method:
+    value: "random+none"
+  k2:
+    value: 500
+  epochs:
+    value: 1
+  batch-size:
+    value: 2
+  eval-method:
+    value: llm_judge
+  model-id:
+    value: meta-llama/Meta-Llama-3.1-8B-Instruct
+  projection-method:
+    value: cos_sim
+  eval-data-base-dir:
+    value: /scratch/users/spa-data-attribution
+
+command:
+  - ${env}
+  - python
+  - script_cos/sweep_run.py
+  - ${args}

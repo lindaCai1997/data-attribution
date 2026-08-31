@@ -154,8 +154,13 @@ class TRAKArgs:
     jl_chunk_size: int = 200_000  # Reduced from 1M to fit in 24GB GPU
     # Layer pattern for which linear layers to include
     layer_pattern: str = r"layers\.\d+\.(self_attn|mlp)\.(q|k|v|o|gate|up|down)_proj"
-    # Enable gradient checkpointing to save memory
-    gradient_checkpointing: bool = True
+    # Gradient checkpointing roughly doubles forward FLOPs per example (re-runs
+    # each block during backward) and is unnecessary at batch_size=1 for an 8B
+    # model on a 24GB GPU. Off by default; pass --gradient-checkpointing to
+    # re-enable if you ever run on a tighter card.
+    gradient_checkpointing: bool = False
+    # Projector backend: "factored" (Kronecker, fast) or "streaming" (count-sketch, original).
+    projector_type: str = "factored"
 
 
 # ---------- Runner ----------
@@ -227,6 +232,7 @@ def run(args: TRAKArgs):
         dtype=args.grad_dtype,
         jl_chunk_size=args.jl_chunk_size,
         layer_pattern=args.layer_pattern,
+        projector_type=args.projector_type,
     )
 
     gradient_computer = WeightGradientComputer(model, trak_config, device)
@@ -290,10 +296,6 @@ def run(args: TRAKArgs):
         local_scores.append(scores_bt.detach().cpu())
         local_idx.append(batch["idx"])
         step += 1
-
-        # Clear GPU cache periodically to prevent fragmentation
-        if step % 10 == 0:
-            torch.cuda.empty_cache()
 
         # Periodic saving
         if args.save_every and step % args.save_every == 0:
@@ -437,9 +439,16 @@ def parse_args() -> TRAKArgs:
         help="Regex pattern for linear layers to include",
     )
     p.add_argument(
-        "--no-gradient-checkpointing",
+        "--gradient-checkpointing",
         action="store_true",
-        help="Disable gradient checkpointing",
+        help="Enable gradient checkpointing (off by default; only useful on tight-memory GPUs).",
+    )
+    p.add_argument(
+        "--projector-type",
+        choices=["factored", "streaming"],
+        default="factored",
+        help="JL projector backend. 'factored' is the fast Kronecker projector; "
+        "'streaming' is the original per-element count-sketch (slow, kept for parity).",
     )
 
     a = p.parse_args()
@@ -464,7 +473,8 @@ def parse_args() -> TRAKArgs:
         save_every=a.save_every,
         jl_chunk_size=a.jl_chunk_size,
         layer_pattern=a.layer_pattern,
-        gradient_checkpointing=not a.no_gradient_checkpointing,
+        gradient_checkpointing=a.gradient_checkpointing,
+        projector_type=a.projector_type,
     )
 
 

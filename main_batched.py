@@ -164,6 +164,56 @@ class LayerHook:
         self.grad = None
 
 
+# ---------- Resume detection ----------
+def find_resume_state(out_dirs: Dict[str, Path], rank: int) -> Tuple[int, int]:
+    """Return (n_examples_done, next_shard_idx) for this rank.
+
+    A shard k is considered 'completed' for this rank only if
+    data.rank{rank}.part{k}.parquet exists AND is readable in EVERY output dir
+    (so a save that crashed mid-iteration over output dirs is not counted).
+    We then take the longest contiguous prefix [0..k] of completed shards;
+    any gap or partial shard causes us to redo work from the first missing
+    index. Returns (0, 0) if there is nothing to resume from.
+    """
+    if not any(d.exists() for d in out_dirs.values()):
+        return 0, 0
+
+    # For each output dir, collect {shard_idx: row_count} for valid parquets.
+    per_dir_shards: Dict[str, Dict[int, int]] = {}
+    for name, out_dir in out_dirs.items():
+        shards: Dict[int, int] = {}
+        if out_dir.exists():
+            for f in out_dir.glob(f"data.rank{rank}.part*.parquet"):
+                try:
+                    part = int(f.stem.split(".part")[-1])
+                except (ValueError, IndexError):
+                    continue
+                try:
+                    n_rows = pl.scan_parquet(str(f)).select(pl.len()).collect().item()
+                except Exception as e:
+                    print(f"[rank{rank}] resume: cannot read {f}: {e}; ignoring")
+                    continue
+                shards[part] = n_rows
+        per_dir_shards[name] = shards
+
+    # Shards present in every output dir
+    common = set.intersection(*(set(s.keys()) for s in per_dir_shards.values()))
+    if not common:
+        return 0, 0
+
+    # Longest contiguous run starting from 0
+    p = 0
+    while p in common:
+        p += 1
+    if p == 0:
+        return 0, 0
+
+    # Use the first output dir's row counts (parquets share examples per save iteration)
+    any_dir = next(iter(per_dir_shards.values()))
+    n_done = sum(any_dir[k] for k in range(p))
+    return n_done, p
+
+
 # ---------- Loss (masked next-token CE over keep-mask) ----------
 def masked_lm_loss(
     logits: torch.Tensor, input_ids: torch.Tensor, keep_mask: torch.Tensor
@@ -200,6 +250,7 @@ class Args:
     sparse_threshold: float = 0.0  # threshold for pruning small values in sparse_csr
     topk: int = 0  # top-K per row for scores-format=topk
     save_every: int = 1000  # number of batches between partial saves; 0 = only at end
+    resume: bool = True  # skip shards already present in every output dir; assumes same world size
 
 
 # ---------- Runner ----------
@@ -320,6 +371,14 @@ def run(a: Args):
             "residual_change_treatment_with_mask_corrected",
             "grad_act_treatment",
             "residual_control",
+        ],
+        "selected_methods": [
+            "residual_treatment",
+            "residual_control",
+            "residual_diff",
+            "residual_change_treatment",
+            "residual_change_control",
+            "residual_change",
         ]
     }
 
@@ -341,13 +400,33 @@ def run(a: Args):
     local_idx: List[torch.Tensor] = []
     local_scores: Dict[str, List[torch.Tensor]] = {name: [] for name in output_names}
 
+    # Resume: count examples already saved (per rank) and pick up at the next shard.
+    # NOTE: resume requires the same world_size and same dataset order. The
+    # DistributedSampler is built with shuffle=False so per-rank index lists
+    # are deterministic given (dataset_size, world_size).
+    n_done = 0
+    start_shard = 0
+    if a.resume:
+        n_done, start_shard = find_resume_state(out_dirs, rank)
+        if n_done > 0:
+            print(
+                f"[resume][rank {rank}] {n_done} examples already saved across "
+                f"{start_shard} shard(s); resuming at shard {start_shard}"
+            )
+        elif rank == 0:
+            print(f"[resume] no prior shards found; starting from scratch")
+    skip_batches = n_done // a.batch_size
+
     step = 0
-    shard = 0
+    shard = start_shard
     save_info = None
 
     t0 = time.time()
     num_batches = len(dl)
     for ibatch, batch in enumerate(tqdm.tqdm(dl, disable=rank != 0)):
+        # Resume: skip batches whose work is already on disk.
+        if ibatch < skip_batches:
+            continue
         # CONTROL pass
         hook.clear()
         if needs_control:
@@ -528,6 +607,13 @@ def parse_args() -> Args:
         type=int,
         default=1000,
         help="Save scores every N batches (0 = only once at end)",
+    )
+    p.add_argument(
+        "--no-resume",
+        dest="resume",
+        action="store_false",
+        default=True,
+        help="Disable shard-level resume (default: resume any complete shards on disk)",
     )
     a = p.parse_args()
     return Args(**vars(a))

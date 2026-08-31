@@ -1,0 +1,53 @@
+# TRAK baseline for Llama-3.1-8B-Instruct (weight-gradient JL attribution).
+# TRAK is layer-independent — single sweep, l19 root used arbitrarily.
+# Grid: 10 eval x 3 train = 30 runs.
+#
+# Usage:
+#   wandb sweep script_cos/sweep_trak_llama.yaml
+name: downstream_v2_trak_llama
+entity: data_attribution
+project: downstream_v2
+
+method: grid
+
+parameters:
+  root-dir:
+    value: /scratch/users/spa-data-attribution/data/llama_attr_l19_cos
+  train-data-name:
+    values: ["dolly_10k", "openorca_200k", "ultrachat_200k"]
+  eval-data-name:
+    values:
+      - empathy_gpt
+      - laziness_gpt
+      - modesty_gpt
+      - preachiness_gpt
+      - sycophancy_gpt
+      - medhallu_easy_with_knowledge_balanced
+      - medhallu_medium_with_knowledge_balanced
+      - medhallu_hard_with_knowledge_balanced
+      - ultra_coding_instruction_following
+      - ultra_factual_truthfulness
+  attribution-method:
+    value: "trak+none"
+  selection-method:
+    value: "trak"
+  k2:
+    value: 500
+  epochs:
+    value: 1
+  batch-size:
+    value: 2
+  eval-method:
+    value: llm_judge
+  model-id:
+    value: meta-llama/Meta-Llama-3.1-8B-Instruct
+  projection-method:
+    value: cos_sim
+  eval-data-base-dir:
+    value: /scratch/users/spa-data-attribution
+
+command:
+  - ${env}
+  - python
+  - script_cos/sweep_run.py
+  - ${args}

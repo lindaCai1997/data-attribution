@@ -3,6 +3,7 @@
 # Computes weight gradients on linear layers, applies JL projection, and stores projected vectors.
 # Reference: https://arxiv.org/abs/2303.14186
 
+import hashlib
 import math
 import re
 from dataclasses import dataclass, field
@@ -26,6 +27,8 @@ class TRAKConfig:
     # Layer pattern for Llama-style models (attention + MLP linear layers only)
     # Excludes: embed_tokens, lm_head, all normalization layers
     layer_pattern: str = r"layers\.\d+\.(self_attn|mlp)\.(q|k|v|o|gate|up|down)_proj"
+    # Projector backend: "factored" (Kronecker, default) or "streaming" (count-sketch).
+    projector_type: str = "factored"
 
 
 # ---------- Streaming JL Projector ----------
@@ -55,11 +58,16 @@ class StreamingJLProjector:
         self.chunk_size = chunk_size
         self.device = device or torch.device("cpu")
 
-        # Pre-compute deterministic seeds for each layer (for reproducibility)
+        # Pre-compute deterministic seeds for each layer (for reproducibility).
+        # Why: Python's built-in hash() of strings is randomized per process
+        # (PYTHONHASHSEED defaults to "random"), so hash((seed, name)) would
+        # produce different seeds across ranks and across separate torchrun
+        # invocations -- making train/eval projection matrices incompatible
+        # and silently breaking downstream cosine-similarity attribution.
         self.layer_seeds: Dict[str, int] = {}
         for name in layer_names:
-            # Use hash to get consistent seed per layer name
-            self.layer_seeds[name] = (hash((seed, name)) % (2**31))
+            digest = hashlib.sha256(f"{seed}:{name}".encode("utf-8")).digest()
+            self.layer_seeds[name] = int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
 
     def project_layer(
         self,
@@ -98,8 +106,10 @@ class StreamingJLProjector:
         # 1M elements = 48MB, safe chunk size
         chunk_size = 1_000_000
 
-        # Set seed once at start for this layer
-        torch.manual_seed(layer_seed)
+        # Use a local Generator so we don't mutate the global CUDA RNG state
+        # (which would perturb dropout / any other torch.* RNG consumer).
+        gen = torch.Generator(device=self.device)
+        gen.manual_seed(layer_seed)
 
         for start in range(0, num_elements, chunk_size):
             end = min(start + chunk_size, num_elements)
@@ -107,8 +117,8 @@ class StreamingJLProjector:
             chunk_len = end - start
 
             # Generate random indices and signs for this chunk
-            indices = torch.randint(0, self.projection_dim, (chunk_len, num_projections), device=self.device)
-            signs = torch.randint(0, 2, (chunk_len, num_projections), device=self.device).float() * 2 - 1
+            indices = torch.randint(0, self.projection_dim, (chunk_len, num_projections), device=self.device, generator=gen)
+            signs = torch.randint(0, 2, (chunk_len, num_projections), device=self.device, generator=gen).float() * 2 - 1
 
             # Compute contributions: gradient * sign * scale
             contributions = (chunk.unsqueeze(1) * signs * scale)
@@ -121,6 +131,23 @@ class StreamingJLProjector:
             del indices, signs, contributions
 
         return result
+
+    def project_grad_x_inp(
+        self,
+        grad_out: torch.Tensor,
+        inp: torch.Tensor,
+        layer_name: str,
+    ) -> torch.Tensor:
+        """
+        Project the implicit weight gradient dW = grad_out.T @ inp.
+
+        For the streaming projector, this materializes dW first (cost
+        O(N * out * in)) and then count-sketches it. The factored projector
+        skips that materialization. Both implement the same interface so the
+        hook can swap them transparently.
+        """
+        weight_grad = grad_out.T @ inp
+        return self.project_layer(weight_grad, layer_name)
 
     def project_gradient_dict(
         self,
@@ -144,19 +171,111 @@ class StreamingJLProjector:
         return result
 
 
+# ---------- Factored (Kronecker) JL Projector ----------
+class FactoredJLProjector:
+    """
+    Factored / Kronecker Johnson-Lindenstrauss projector.
+
+    For each linear layer with weight shape [out, in], we precompute two
+    Rademacher matrices P_out in R^[k_out, out] and P_in in R^[k_in, in], with
+    k_out * k_in = projection_dim. The projection of the weight gradient
+    dW = grad_out.T @ inp is computed without materializing dW:
+
+        proj(dW) = vec(P_out @ dW @ P_in.T)
+                 = vec((P_out @ grad_out.T) @ (inp @ P_in.T))
+
+    Cost per layer: O(N * (out*k_out + in*k_in + k_out*k_in)), versus
+    O(N * out * in) just to form dW under the streaming backend (plus the
+    count-sketch RNG/scatter overhead). For Llama-3.1-8B's down_proj
+    (out=4096, in=14336) with k_out=k_in=64, this is roughly 30x fewer FLOPs.
+
+    The Kronecker factorization gives a weaker JL guarantee than a fully
+    independent random projection (entries of P_out (x) P_in are not
+    independent), but is the standard fast-projector trick used by the
+    original TRAK implementation (CudaProjector).
+    """
+
+    def __init__(
+        self,
+        layer_shapes: Dict[str, Tuple[int, int]],
+        projection_dim: int,
+        seed: int,
+        device: torch.device = None,
+        dtype: torch.dtype = torch.float32,
+    ):
+        self.projection_dim = projection_dim
+        self.device = device or torch.device("cpu")
+        self.dtype = dtype
+
+        # Factor projection_dim = k_out * k_in with k_out, k_in as balanced as
+        # possible while both dividing projection_dim.
+        k_in = int(math.isqrt(projection_dim))
+        while k_in > 1 and projection_dim % k_in != 0:
+            k_in -= 1
+        k_out = projection_dim // k_in
+        self.k_out = k_out
+        self.k_in = k_in
+
+        scale_out = 1.0 / math.sqrt(k_out)
+        scale_in = 1.0 / math.sqrt(k_in)
+        self.P_out: Dict[str, torch.Tensor] = {}
+        self.P_in: Dict[str, torch.Tensor] = {}
+        for name, (out_f, in_f) in layer_shapes.items():
+            # Deterministic per-layer seed; same rationale as in StreamingJLProjector.
+            digest = hashlib.sha256(f"{seed}:{name}:factored".encode("utf-8")).digest()
+            layer_seed = int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
+            gen = torch.Generator(device=self.device)
+            gen.manual_seed(layer_seed)
+
+            p_out = torch.randint(
+                0, 2, (k_out, out_f), device=self.device, generator=gen, dtype=torch.int32
+            ).to(dtype)
+            p_out.mul_(2).sub_(1).mul_(scale_out)
+
+            p_in = torch.randint(
+                0, 2, (k_in, in_f), device=self.device, generator=gen, dtype=torch.int32
+            ).to(dtype)
+            p_in.mul_(2).sub_(1).mul_(scale_in)
+
+            self.P_out[name] = p_out
+            self.P_in[name] = p_in
+
+    def project_grad_x_inp(
+        self,
+        grad_out: torch.Tensor,  # [N, out]
+        inp: torch.Tensor,       # [N, in]
+        layer_name: str,
+    ) -> torch.Tensor:
+        if layer_name not in self.P_out:
+            raise ValueError(f"Unknown layer: {layer_name}")
+        p_out = self.P_out[layer_name]
+        p_in = self.P_in[layer_name]
+        go = grad_out.to(self.dtype)
+        ip = inp.to(self.dtype)
+        # (k_out, N) = (k_out, out) @ (out, N)
+        a = p_out @ go.T
+        # (N, k_in) = (N, in) @ (in, k_in)
+        b = ip @ p_in.T
+        # (k_out, k_in) -> flatten to (k_out * k_in,) = (projection_dim,)
+        # Return fp32 so callers can sum into the fp32 accumulator regardless
+        # of self.dtype (which controls the matmul precision).
+        return (a @ b).flatten().to(torch.float32)
+
+
 # ---------- Gradient Capture Hook ----------
 class GradientCaptureHook:
     """
-    Hook that captures inputs during forward and computes weight gradients during backward.
+    Hook that captures inputs during forward and projects the weight gradient
+    during backward, without ever materializing dW for the full layer.
 
-    For a linear layer y = x @ W^T + b:
-    - Weight gradient: dL/dW = grad_output^T @ input
-
-    This allows us to compute, project, and discard gradients on-the-fly during backward,
-    avoiding storing all ~7B parameter gradients simultaneously.
+    For a linear layer y = x @ W.T + b, the per-step weight gradient is
+    dL/dW = grad_output.T @ input. Rather than form that [out, in] matrix and
+    project it, we hand (grad_output, input) directly to the projector, which
+    can choose to factorize (FactoredJLProjector) or materialize-and-sketch
+    (StreamingJLProjector).
     """
 
-    def __init__(self, layer_name: str, projector: StreamingJLProjector, accumulator: torch.Tensor):
+    def __init__(self, layer_name: str, projector, accumulator: torch.Tensor):
         self.layer_name = layer_name
         self.projector = projector
         self.accumulator = accumulator  # Reference to shared accumulator
@@ -178,29 +297,21 @@ class GradientCaptureHook:
             self.input_saved = None
             return None
 
-        # Debug: print layer being processed
-        import sys
-        print(f"  [HOOK] Processing {self.layer_name}", end="\r", file=sys.stderr)
-
         # grad_output[0] has shape [B, T, out_features] or [B*T, out_features]
         grad_out = grad_output[0]
         inp = self.input_saved
 
-        # Reshape to 2D: [B*T, features]
-        if grad_out.dim() == 3:
-            B, T, out_features = grad_out.shape
-            grad_out = grad_out.reshape(B * T, out_features)
-        if inp.dim() == 3:
+        # Flatten any leading (batch, time) dims so we have a 2D contract
+        # for the projector: grad_out [N, out], inp [N, in].
+        if grad_out.dim() > 2:
+            grad_out = grad_out.reshape(-1, grad_out.size(-1))
+        if inp.dim() > 2:
             inp = inp.reshape(-1, inp.size(-1))
 
-        # Weight gradient: dW = grad_out^T @ inp
-        # W has shape [out_features, in_features]
-        # grad_out: [B*T, out_features], inp: [B*T, in_features]
-        # dW = grad_out.T @ inp = [out_features, B*T] @ [B*T, in_features] = [out_features, in_features]
-        weight_grad = grad_out.T @ inp
-
-        # Project immediately and accumulate
-        projected = self.projector.project_layer(weight_grad, self.layer_name)
+        # Project without materializing the full [out, in] weight gradient.
+        # The factored projector does this directly; the streaming projector
+        # still forms dW internally for back-compat.
+        projected = self.projector.project_grad_x_inp(grad_out, inp, self.layer_name)
         self.accumulator.add_(projected)
 
         # Clear saved input to free memory
@@ -240,13 +351,37 @@ class WeightGradientComputer:
         layer_names = [name for name, _ in self.linear_layers]
 
         # Initialize projector
-        self.projector = StreamingJLProjector(
-            layer_names=layer_names,
-            projection_dim=config.projection_dim,
-            seed=config.seed,
-            chunk_size=config.jl_chunk_size,
-            device=self.device,
-        )
+        if config.projector_type == "factored":
+            dtype_map = {
+                "float32": torch.float32,
+                "bfloat16": torch.bfloat16,
+                "float16": torch.float16,
+            }
+            proj_dtype = dtype_map[config.dtype]
+            layer_shapes = {
+                name: (layer.weight.shape[0], layer.weight.shape[1])
+                for name, layer in self.linear_layers
+            }
+            self.projector = FactoredJLProjector(
+                layer_shapes=layer_shapes,
+                projection_dim=config.projection_dim,
+                seed=config.seed,
+                device=self.device,
+                dtype=proj_dtype,
+            )
+        elif config.projector_type == "streaming":
+            self.projector = StreamingJLProjector(
+                layer_names=layer_names,
+                projection_dim=config.projection_dim,
+                seed=config.seed,
+                chunk_size=config.jl_chunk_size,
+                device=self.device,
+            )
+        else:
+            raise ValueError(
+                f"Unknown projector_type={config.projector_type!r}; "
+                "expected 'factored' or 'streaming'."
+            )
 
         # Compute total parameters for info
         self.total_params = sum(
@@ -292,9 +427,16 @@ class WeightGradientComputer:
             loss_fn: Function that computes loss given (logits, input_ids, keep_mask)
 
         Returns:
-            Projected gradient vector [B, projection_dim]
+            Projected gradient vector [1, projection_dim]
         """
         batch_size = input_ids.shape[0]
+        # The hook accumulator sums grad_out.T @ inp across the entire batch
+        # axis, so a multi-sample batch would collapse to a single (incorrect)
+        # vector. Use compute_per_sample_projected_gradient for B > 1.
+        assert batch_size == 1, (
+            f"compute_projected_gradient requires batch_size=1, got {batch_size}. "
+            "Use compute_per_sample_projected_gradient for larger batches."
+        )
 
         # Accumulator for projected gradients (shared across all hooks)
         accumulator = torch.zeros(
@@ -352,8 +494,8 @@ class WeightGradientComputer:
             # Clean up
             self.model.zero_grad(set_to_none=True)
 
-        # Return result with batch dimension
-        return accumulator.unsqueeze(0).expand(batch_size, -1).clone()
+        # Return result with batch dimension (batch_size==1 enforced above)
+        return accumulator.unsqueeze(0)
 
     def compute_per_sample_projected_gradient(
         self,

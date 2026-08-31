@@ -1,0 +1,60 @@
+# Main downstream sweep for Qwen2.5-7B-Instruct across layers [13, 15, 17, 19].
+# Cartesian: 4 layers x 2 attribution x 3 selection x 10 eval x 3 train = 720 runs.
+# Layer is inferred from root-dir by sweep_run.py (needed for persona_vector_gen).
+#
+# Usage:
+#   wandb sweep script_cos/sweep_main_qwen.yaml
+#   SWEEP_ID=data_attribution/downstream_v2/<sweep_id> bash script_cos/run_slurm_sweep_wandb.sh
+name: downstream_v2_main_qwen
+entity: data_attribution
+project: downstream_v2
+
+method: grid
+
+parameters:
+  root-dir:
+    values:
+      - /scratch/users/spa-data-attribution/data/qwen2.5_attr_l13_cos
+      - /scratch/users/spa-data-attribution/data/qwen2.5_attr_l15_cos
+      - /scratch/users/spa-data-attribution/data/qwen2.5_attr_l17_cos
+      - /scratch/users/spa-data-attribution/data/qwen2.5_attr_l19_cos
+  train-data-name:
+    values: ["dolly_10k", "openorca_200k", "ultrachat_200k"]
+  eval-data-name:
+    values:
+      - empathy_gpt
+      - laziness_gpt
+      - modesty_gpt
+      - preachiness_gpt
+      - sycophancy_gpt
+      - medhallu_easy_with_knowledge_balanced
+      - medhallu_medium_with_knowledge_balanced
+      - medhallu_hard_with_knowledge_balanced
+      - ultra_coding_instruction_following
+      - ultra_factual_truthfulness
+  attribution-method:
+    values: ["residual_diff+none", "residual_change_treatment+none"]
+  selection-method:
+    values: ["residual_diff+none", "residual_change+none", "persona_vector_gen"]
+  k2:
+    value: 500
+  epochs:
+    value: 1
+  batch-size:
+    value: 2
+  eval-method:
+    value: llm_judge
+  model-id:
+    value: Qwen/Qwen2.5-7B-Instruct
+  projection-method:
+    value: cos_sim
+  persona-vector-path:
+    value: /scratch/users/spa-data-attribution/data/qwen_persona_vectors
+  eval-data-base-dir:
+    value: /scratch/users/spa-data-attribution
+
+command:
+  - ${env}
+  - python
+  - script_cos/sweep_run.py
+  - ${args}

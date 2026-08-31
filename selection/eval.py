@@ -190,7 +190,7 @@ def eval_cross_entropy_lora_dir(cfg: EvalConfig) -> None:
     sum_ctrl = torch.tensor([local_mean_ce_ctrl * len(convs_ctrl)], device=cfg.device)
 
     # 4. Distributed Aggregation
-    if dist.is_initialized():
+    if dist.is_initialized() and dist.get_world_size() > 1:
         dist.all_reduce(count, op=dist.ReduceOp.SUM)
         dist.all_reduce(sum_treat, op=dist.ReduceOp.SUM)
         dist.all_reduce(sum_ctrl, op=dist.ReduceOp.SUM)
@@ -287,6 +287,9 @@ DEFAULT_TRAITS = {
     "medhallu_easy_with_knowledge": ["medical_consistency_0_2"],
     "medhallu_medium_with_knowledge": ["medical_consistency_0_2"],
     "medhallu_hard_with_knowledge": ["medical_consistency_0_2"],
+    "medhallu_easy_with_knowledge_balanced": ["medical_consistency_0_2"],
+    "medhallu_medium_with_knowledge_balanced": ["medical_consistency_0_2"],
+    "medhallu_hard_with_knowledge_balanced": ["medical_consistency_0_2"],
     "evil_gpt": ["evil"],
     "hallucination_gpt": ["hallucination"],
     "sycophancy_gpt": ["sycophancy"],
@@ -479,7 +482,7 @@ def eval_llm_judge(cfg: EvalConfig) -> None:
 
     # 5. Gather Everything to Rank 0
     gathered_lists = [None for _ in range(get_world_size())]
-    if dist.is_initialized():
+    if dist.is_initialized() and dist.get_world_size() > 1:
         dist.all_gather_object(gathered_lists, all_local_results)
     else:
         gathered_lists = [all_local_results]
