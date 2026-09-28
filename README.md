@@ -205,8 +205,8 @@ The `analysis/` folder contains the analyses behind the paper's results. `paper_
 ## Evaluation Datasets
 
 The evaluation datasets used in the paper (personality traits, UltraFeedback, MedHallu) are bundled in
-[`eval-dataset/`](eval-dataset/): contrastive treatment/control parquets under `eval-dataset/data/` and held-out
-judge prompts under `eval-dataset/eval_prompts/`. See [`eval-dataset/README.md`](eval-dataset/README.md) for the schema.
+[`behavior_dataset/`](behavior_dataset/): contrastive treatment/control parquets under `behavior_dataset/data/` and held-out
+judge prompts under `behavior_dataset/eval_prompts/`. See [`behavior_dataset/README.md`](behavior_dataset/README.md) for the schema.
 
 ### LLM Judge
 

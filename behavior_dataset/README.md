@@ -14,8 +14,8 @@ Three benchmark families are included.
 ## Layout
 
 ```
-data/<family>/<name>.parquet        contrastive treatment/control pairs (attribution inputs)
-eval_prompts/<family>/<name>.json   held-out prompts for post-finetuning LLM-judge evaluation
+data/<name>.parquet                 contrastive treatment/control pairs (attribution inputs)
+eval_prompts/<name>.json            held-out prompts for post-finetuning LLM-judge evaluation
 ```
 
 ## Parquet schema
@@ -33,7 +33,7 @@ Both conversations share the user turn and differ only in the last assistant tur
 
 ```python
 from datasets import load_dataset
-ds = load_dataset("parquet", data_files="data/personality_traits/empathy_gpt.parquet")["train"]
+ds = load_dataset("parquet", data_files="data/empathy_gpt.parquet")["train"]
 ds[0]["treatment_messages"]
 # [{'role': 'user', 'content': '...'}, {'role': 'assistant', 'content': '...'}]
 ```
