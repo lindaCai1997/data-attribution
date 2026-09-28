@@ -204,6 +204,10 @@ The `analysis/` folder contains the analyses behind the paper's results. `paper_
 
 ## Evaluation Datasets
 
+The evaluation datasets used in the paper (personality traits, UltraFeedback, MedHallu) are bundled in
+[`eval-dataset/`](eval-dataset/): contrastive treatment/control parquets under `eval-dataset/data/` and held-out
+judge prompts under `eval-dataset/eval_prompts/`. See [`eval-dataset/README.md`](eval-dataset/README.md) for the schema.
+
 ### LLM Judge
 
 The pipeline uses GPT-4 as an LLM judge to evaluate model outputs. We evaluate on the following datasets:
