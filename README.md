@@ -77,7 +77,10 @@ pip install -r requirements.txt
 
 ### Step 1: Compute Attribution Vectors
 
-We provide three scripts for computing attribution vectors:
+We provide three scripts for computing attribution vectors. The paper's behavior (eval-side) datasets ship in this
+repo under [`behavior_dataset/data/`](behavior_dataset/data/), so e.g. `--data behavior_dataset/data/sycophancy_gpt.parquet`
+works out of the box. The training corpora (Dolly-10k, UltraChat-200k, OpenOrca-200k) are not bundled and must be
+prepared separately in the same `treatment_messages` / `control_messages` schema.
 
 #### Option A: Batched Activation-Based Attribution (if you want to compute vectors from multiple attribution methods simultaenously)
 
@@ -302,6 +305,8 @@ Default data paths (can be overridden via arguments):
 | Type | Default Path |
 |------|--------------|
 | Datasets | `{root_dir}/dataset/{data_file_name}.parquet` |
+| Bundled behavior datasets | `behavior_dataset/data/{data_file_name}.parquet` |
+| Bundled eval prompts (LLM judge) | `behavior_dataset/eval_prompts/{data_file_name}.json` |
 | Attribution Scores | `{root_dir}/{train_data_name}/{method}/` |
 
 
