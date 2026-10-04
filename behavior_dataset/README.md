@@ -7,8 +7,8 @@ Three benchmark families are included.
 | Family | Files | Rows | Target behavior | Judge scale |
 |---|---|---|---|---|
 | `personality_traits` | `empathy_gpt`, `laziness_gpt`, `modesty_gpt`, `preachiness_gpt`, `sycophancy_gpt` | 300 each | Expression of the named trait | 0–3 |
-| `ultrafeedback` | `ultra_factual_truthfulness` | 423 | Factual hallucination (untruthful answers) | 0–3 |
-| `ultrafeedback` | `ultra_coding_instruction_following` | 800 | Coding instruction-following failure | 0–3 |
+| `ultrafeedback` | `ultra_factual_truthfulness` | 277 | Factual hallucination (untruthful answers) | 0–3 |
+| `ultrafeedback` | `ultra_coding_instruction_following` | 216 | Coding instruction-following failure | 0–3 |
 | `medhallu` | `medhallu_{easy,medium,hard}_with_knowledge_balanced` | 972 / 1116 / 1992 | Reading-comprehension hallucination (evidence in prompt) | 0–2 |
 
 ## Layout
@@ -43,7 +43,8 @@ ds[0]["treatment_messages"]
 `eval_prompts/*.json` are JSON lists of held-out prompts, disjoint from the parquet rows.
 
 - Personality traits: a list of prompt strings.
-- UltraFeedback: a list of `{question, reference_answers: {high_quality, ...}}` objects.
+- UltraFeedback: a list of `{question, reference_answers: {high_quality, low_quality}}` objects,
+  100 per file.
 - MedHallu: a list of `{question (with [CONTEXT] passage), ...ground truth fields}` objects.
   160 held-out examples for easy and medium, 180 for hard, balanced between yes/no answers.
 
@@ -53,6 +54,16 @@ ds[0]["treatment_messages"]
   following the persona-vector data generation recipe.
 - **UltraFeedback**: derived from [openbmb/UltraFeedback](https://huggingface.co/datasets/openbmb/UltraFeedback);
   treatment = lowest-rated completion, control = highest-rated completion on the named aspect.
+  Both files were re-cleaned with an LLM judge that read every row:
+  - `ultra_coding_instruction_following` keeps only prompts that require code (all `flan_v2_*`
+    rows and non-coding `evol_instruct` rows removed), and only pairs where the control actually
+    follows the instructions with essentially correct code and the treatment clearly fails them
+    (800 → 216).
+  - `ultra_factual_truthfulness` keeps only factual / false-premise questions where the control is
+    accurate and corrects the premise and the treatment makes a false claim (423 → 277).
+  - Eval prompts were filtered the same way (on-topic question, correct `high_quality` reference)
+    and topped back up to 100 each with unused UltraFeedback prompts that pass the same checks
+    (reference rated 5, `low_quality` rated ≤ 2 on the aspect).
 - **MedHallu**: derived from [MedHallu](https://huggingface.co/datasets/UTAustin-AIHealth/MedHallu)
   (built on PubMedQA); treatment = hallucinated answer, control = ground-truth answer.
   Eval sets are balanced between *yes* and *no* ground-truth answers.
